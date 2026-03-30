@@ -1,37 +1,51 @@
 """
-Database migration script for Hospital IoT System.
-Creates all tables and seeds the default admin user.
-
-Usage:
-    python migrate.py
+Hospital IoT — Database Migration & Admin Seeding Script
+Run: python3 migrate.py [--reset]
 """
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+import sys
+import os
+
+# Ensure backend directory is in path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from database import engine, Base, SessionLocal
+from models import Device, SensorData, Alert, Patient, User, AuditLog
 from passlib.context import CryptContext
-from config import DATABASE_URL
-from models import Base, User
+from sqlalchemy import select, text
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def init_db():
-    """Create all tables and seed admin user."""
-    print(f"Connecting to database...")
-    engine = create_engine(DATABASE_URL, echo=True)
+def migrate(reset=False):
+    print("=" * 50)
+    print("Hospital IoT — Database Migration")
+    print("=" * 50)
 
-    # Create all tables
-    print("Creating tables...")
-    Base.metadata.create_all(engine)
-    print("Tables created successfully!")
+    if reset:
+        print("\n⚠️  RESET MODE: Dropping all tables...")
+        with engine.begin() as conn:
+            Base.metadata.drop_all(conn)
+        print("✅ All tables dropped")
+
+    print("\n📦 Creating tables...")
+    with engine.begin() as conn:
+        Base.metadata.create_all(conn)
+
+    tables = ["devices", "sensor_data", "alerts", "patients", "users", "audit_logs"]
+    print(f"✅ {len(tables)} tables created/verified:")
+    for t in tables:
+        print(f"   • {t}")
 
     # Seed admin user
-    Session = sessionmaker(bind=engine)
-    session = Session()
+    print("\n👤 Checking admin user...")
+    with SessionLocal() as session:
+        result = session.execute(select(User).where(User.username == "admin"))
+        admin = result.scalar_one_or_none()
 
-    try:
-        existing = session.query(User).filter_by(username="admin").first()
-        if not existing:
+        if admin:
+            print("   Admin user already exists")
+        else:
             admin = User(
                 username="admin",
                 password_hash=pwd_context.hash("admin123"),
@@ -39,19 +53,15 @@ def init_db():
             )
             session.add(admin)
             session.commit()
-            print("Default admin user created (admin / admin123)")
-        else:
-            print("Admin user already exists, skipping seed.")
-    except Exception as e:
-        session.rollback()
-        print(f"Error seeding admin: {e}")
-        raise
-    finally:
-        session.close()
+            print("   ✅ Admin user created (admin / admin123)")
 
-    engine.dispose()
+    print("\n" + "=" * 50)
     print("Migration complete!")
+    print("Run: cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 --reload")
+    print("Dashboard: http://localhost:8000/dashboard/")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
-    init_db()
+    reset_flag = "--reset" in sys.argv
+    migrate(reset=reset_flag)

@@ -41,10 +41,9 @@ float currentSpO2 = 0;
 int   currentBedStatus = 0;
 
 // ============================================
-// Retry Counter
+// Sensor Init Flag
 // ============================================
-int consecutiveFailures = 0;
-const int MAX_FAILURES = 5;
+bool sensorOk = false;
 
 // ============================================
 // Callback for MAX30100 beat detection
@@ -73,11 +72,13 @@ void setup() {
     if (!pox.begin()) {
         Serial.println(" FAILED!");
         Serial.println("Check wiring: SDA->D2, SCL->D1, VIN->3.3V");
-        // Continue without sensor (will send dummy data for testing)
+        Serial.println("SENSOR FAILURE: Will report 0/0 to trigger server alert.");
+        sensorOk = false;
     } else {
         Serial.println(" OK");
         pox.setIRLedCurrent(MAX30100_LED_CURR_7_6MA);
         pox.setOnBeatDetectedCallback(onBeatDetected);
+        sensorOk = true;
     }
 
     // Pressure sensor pin
@@ -155,17 +156,21 @@ void connectWiFi() {
 // ============================================
 // Send Vitals Data to Backend
 // ============================================
+int consecutiveFailures = 0;
+const int MAX_FAILURES = 5;
+
 void sendVitalsData() {
     if (WiFi.status() != WL_CONNECTED) return;
 
-    // Use real sensor values or test values
     float hr = currentHeartRate;
     float spo2 = currentSpO2;
 
-    // If sensor not giving readings, use realistic test values
-    if (hr < 1 || spo2 < 1) {
-        hr = random(65, 100);          // Simulate 65-100 BPM
-        spo2 = random(940, 1000) / 10.0; // Simulate 94.0-100.0%
+    // If sensor not initialized or not giving readings, send 0/0
+    // The backend will detect this as a sensor failure and create an alert
+    if (!sensorOk || hr < 1 || spo2 < 1) {
+        hr = 0;
+        spo2 = 0;
+        Serial.println("[DATA] WARNING: Sensor not reading. Sending 0/0 for failure alert.");
     }
 
     // Build JSON payload

@@ -102,10 +102,10 @@ A production-grade, real-time IoT-based hospital monitoring system that tracks *
 | **Sensors** | MAX30100 (Heart Rate + SpO₂), FSR 402 (Bed Pressure) |
 | **Backend** | Python 3.9+, FastAPI, SQLAlchemy, Uvicorn |
 | **Database** | PostgreSQL (Supabase hosted) |
-| **Frontend** | HTML5, CSS3, Vanilla JavaScript |
-| **Charts** | Chart.js |
-| **3D Visuals** | Three.js |
-| **Real-time** | WebSocket (with HTTP polling fallback for serverless) |
+| **Frontend** | React 19, Vite, TailwindCSS (optional), Lucide |
+| **Charts** | Chart.js & React-Chartjs-2 |
+| **3D Visuals** | Three.js (if applicable) |
+| **Real-time** | WebSocket via Socket.io-client / Native WebSockets |
 | **AI** | NumPy (rule-based, LSTM-ready) |
 | **Auth** | JWT (python-jose), bcrypt |
 | **Deployment** | Vercel (serverless), Docker |
@@ -118,19 +118,18 @@ A production-grade, real-time IoT-based hospital monitoring system that tracks *
 hospital-iot/
 │
 ├── backend/                    # FastAPI backend application
-│   ├── main.py                 # All routes, WebSocket, scheduler, AI engine (828 lines)
+│   ├── main.py                 # All routes, WebSocket, scheduler, AI engine
 │   ├── config.py               # Environment-based configuration
 │   ├── database.py             # SQLAlchemy engine & session factory
-│   ├── models.py               # ORM models (Device, SensorData, Alert, Patient, User, AuditLog)
+│   ├── models.py               # ORM models
 │   ├── migrate.py              # Database migration & admin seeding script
 │   └── requirements.txt        # Python dependencies
 │
-├── dashboard/                  # Frontend (served as static files)
-│   ├── index.html              # Single-page app with all pages
-│   ├── style.css               # Complete styling (glassmorphism, animations, themes)
-│   ├── app.js                  # Auth, API calls, device management
-│   ├── dashboard.js            # Real-time dashboard logic, charts, WebSocket client
-│   └── three_scene.js          # 3D hospital floor plan (Three.js)
+├── frontend/                   # React + Vite Frontend
+│   ├── src/                    # React components, pages, context
+│   ├── public/                 # Static assets
+│   ├── package.json            # Node dependencies
+│   └── vite.config.js          # Vite configuration
 │
 ├── firmware/                   # ESP8266 Arduino firmware
 │   └── esp8266_monitor/
@@ -204,12 +203,20 @@ This creates 6 tables: `devices`, `sensor_data`, `alerts`, `patients`, `users`, 
 
 ### Running Locally
 
+1. **Start the Backend:**
 ```bash
 cd backend
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Open your browser: **http://localhost:8000/dashboard/**
+2. **Start the Frontend:**
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open your browser: **http://localhost:5173**
 
 **Default login credentials:**
 | Username | Password | Role |

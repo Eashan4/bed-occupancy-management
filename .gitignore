@@ -24,16 +24,16 @@ build/
 .DS_Store
 Thumbs.db
 
-# Database files
+# Database files (local SQLite)
 *.db
 *.sqlite3
 
 # Logs
 *.log
 
-# Temporary/Notes
-*.txt
-*.pdf
-
 # Simulation scripts
 sim_device.sh
+
+# User exclusions
+archive_old_files/
+*.zip

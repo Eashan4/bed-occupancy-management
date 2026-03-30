@@ -1,52 +1,28 @@
-import ssl
+import os
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm import declarative_base
-from config import DATABASE_URL
+from sqlalchemy.orm import declarative_base, sessionmaker
+from config import DB_USER, DB_PASS, DB_HOST, DB_PORT, DB_NAME
 
 # ============================================
-# Convert DATABASE_URL for pg8000 driver
+# Database Engine Setup
 # ============================================
-db_url = DATABASE_URL
-if db_url.startswith("postgresql://"):
-    db_url = db_url.replace("postgresql://", "postgresql+pg8000://", 1)
-elif db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql+pg8000://", 1)
 
-# ============================================
-# SSL context for Supabase (requires SSL)
-# ============================================
-ssl_context = ssl.create_default_context()
-ssl_context.check_hostname = False
-ssl_context.verify_mode = ssl.CERT_NONE
+db_url = f"mysql+mysqlconnector://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-# ============================================
-# Synchronous Engine & Session
-# ============================================
 engine = create_engine(
     db_url,
     echo=False,
-    pool_size=5,
-    max_overflow=10,
-    pool_recycle=300,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=1800,
     pool_pre_ping=True,
-    connect_args={"ssl_context": ssl_context},
 )
+print("[DB] Using local MySQL connection")
 
-SessionLocal = sessionmaker(
-    bind=engine,
-    autocommit=False,
-    autoflush=False
-)
-
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
-# ============================================
-# Dependency for FastAPI routes
-# ============================================
 def get_db():
-    """Yield a DB session, auto-close after request."""
     db = SessionLocal()
     try:
         yield db
