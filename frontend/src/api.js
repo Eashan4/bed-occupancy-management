@@ -1,8 +1,8 @@
 import axios from "axios";
-import { io } from "socket.io-client";
+
 
 // Define base URL based on environment
-export const API_BASE = "http://localhost:5001";
+export const API_BASE = "http://localhost:8000";
 
 // Axios instance
 export const api = axios.create({
@@ -36,15 +36,75 @@ api.interceptors.response.use(
   }
 );
 
-// Socket instance definition
+// Native WebSocket mock to match socket.io interface
+class SocketMock {
+    constructor(url) {
+        this.url = url;
+        this.ws = null;
+        this.listeners = {};
+        this.connected = false;
+    }
+    
+    connect() {
+        if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) return;
+        this.ws = new WebSocket(this.url);
+        
+        this.ws.onopen = () => {
+            this.connected = true;
+            this.emitLocal("connect");
+        };
+        
+        this.ws.onclose = () => {
+            this.connected = false;
+            this.emitLocal("disconnect");
+        };
+        
+        this.ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data && data.type) {
+                    this.emitLocal(data.type, data);
+                }
+            } catch(e) {}
+        };
+    }
+    
+    disconnect() {
+        if (this.ws) {
+            this.ws.onclose = null; // disable auto-reconnect or onclose trigger
+            this.ws.close();
+            this.ws = null;
+        }
+        this.connected = false;
+    }
+    
+    on(event, callback) {
+        if (!this.listeners[event]) this.listeners[event] = [];
+        this.listeners[event].push(callback);
+    }
+    
+    off(event, callback) {
+        if (!this.listeners[event]) return;
+        if (!callback) {
+            this.listeners[event] = [];
+        } else {
+            this.listeners[event] = this.listeners[event].filter(cb => cb !== callback);
+        }
+    }
+    
+    emitLocal(event, data) {
+        if (this.listeners[event]) {
+            this.listeners[event].forEach(cb => cb(data));
+        }
+    }
+}
+
 let socketInstance = null;
 
 export const getSocket = () => {
     if (!socketInstance) {
-        socketInstance = io(API_BASE, {
-            autoConnect: false,
-            transports: ['polling', 'websocket'], // Force polling first, then websocket upgrade
-        });
+        const wsUrl = API_BASE.replace(/^http/, 'ws') + '/ws/live';
+        socketInstance = new SocketMock(wsUrl);
     }
     return socketInstance;
 };

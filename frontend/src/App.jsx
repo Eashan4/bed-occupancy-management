@@ -86,10 +86,6 @@ function AppLayout({ theme, setTheme }) {
 
   return (
     <div className="app-layout">
-      {/* DEBUG TEST DIV */}
-      <div style={{ position: 'fixed', top: 0, left: 0, background: 'red', color: 'white', zIndex: 9999, padding: '5px' }}>
-        v2.0 UI Mounted
-      </div>
       <aside className="sidebar glass-card">
         <div className="sidebar-header">
           <div className="logo-pulse">

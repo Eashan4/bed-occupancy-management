@@ -12,3 +12,4 @@ bcrypt==4.1.2
 apscheduler==3.10.4
 numpy==1.26.4
 cryptography>=41.0.0
+pyserial==3.5

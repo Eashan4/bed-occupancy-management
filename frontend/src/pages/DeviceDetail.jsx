@@ -140,6 +140,24 @@ export default function DeviceDetail() {
           <p><strong>Ward:</strong> {device.ward}</p>
           <p><strong>Bed:</strong> {device.bed_number}</p>
           <p><strong>Last Seen:</strong> {device.last_seen ? new Date(device.last_seen).toLocaleString() : 'Never'}</p>
+          <div style={{ marginTop: '1rem', padding: '0.75rem', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>Device API Key</p>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <code style={{ flex: 1, fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', userSelect: 'all' }}>
+                {device.api_key}
+              </code>
+              <button 
+                className="btn-icon" 
+                onClick={() => {
+                  navigator.clipboard.writeText(device.api_key);
+                  alert("API Key copied to clipboard!");
+                }}
+                title="Copy API Key"
+              >
+                📋
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="live-vitals-panel glass-card" style={{ padding: '1.5rem', display: 'flex', gap: '2rem', alignItems: 'center', justifyContent: 'center' }}>

@@ -1,5 +1,5 @@
 /*
- * Hospital IoT - ESP8266 Configuration
+ * NeuroGuard Clinic - ESP8266 Configuration
  * Flash these values for each device
  */
 
@@ -9,33 +9,35 @@
 // ============================================
 // WiFi Configuration
 // ============================================
-#define WIFI_SSID        "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD    "YOUR_WIFI_PASSWORD"
+#define WIFI_SSID "ABCDE"
+#define WIFI_PASSWORD "23456789"
 
 // ============================================
 // Server Configuration
 // ============================================
-#define SERVER_URL       "http://YOUR_SERVER_IP:8000"
-#define API_KEY          "YOUR_DEVICE_API_KEY"
-#define DEVICE_ID        "BED_ICU_01"
+#define SERVER_URL "http://192.168.29.88:8000"
+#define API_KEY "1a92c932afb64485b7f943f73d1cd1a072f1d176e9594c238bd0b769b7497448"
+#define DEVICE_ID "BED_A_2"
 
 // ============================================
 // Timing (milliseconds)
 // ============================================
-#define DATA_INTERVAL       5000    // Send vitals every 5 seconds
-#define HEARTBEAT_INTERVAL  10000   // Send heartbeat every 10 seconds
-#define WIFI_RETRY_DELAY    5000    // WiFi reconnect delay
-#define HTTP_TIMEOUT        5000    // HTTP request timeout
+#define DATA_INTERVAL 5000       // Send vitals every 5 seconds
+#define HEARTBEAT_INTERVAL 10000 // Send heartbeat every 10 seconds
+#define WIFI_RETRY_DELAY 5000    // WiFi reconnect delay
+#define HTTP_TIMEOUT 5000        // HTTP request timeout
 
 // ============================================
 // Sensor Pins
 // ============================================
-#define PRESSURE_PIN     A0        // FSR 402 analog pin
-#define PRESSURE_THRESHOLD 500     // ADC value above which bed is "occupied"
+#define BUTTON_PIN D5 // Manual Push Button for Bed Status
 
 // ============================================
-// MAX30100 Configuration
+// MAX30102 Configuration (via SparkFun MAX30105 library)
+// I2C Pins: SDA = D2 (GPIO4), SCL = D1 (GPIO5)
 // ============================================
-#define REPORTING_PERIOD_MS 1000   // MAX30100 reporting period
+// Sensor processing runs in loop() at ~50ms intervals
+// Serial debug output at 10 FPS (100ms)
+// Finger detection threshold: IR > 50000
 
 #endif

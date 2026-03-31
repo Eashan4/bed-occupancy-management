@@ -41,11 +41,23 @@ export default function Alerts() {
     }
   };
 
+  const clearAllAlerts = async () => {
+    try {
+      if (alerts.length === 0) return;
+      if (window.confirm("Are you sure you want to acknowledge and clear all active alerts?")) {
+        await api.delete("/api/dashboard/alerts");
+        fetchAlerts();
+      }
+    } catch (err) {
+      alert("Error clearing alerts");
+    }
+  };
+
   return (
     <div className="page-content active">
       <div className="page-header">
         <h1>System Alerts</h1>
-        <div className="filter-controls">
+        <div className="filter-controls" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           <select 
             className="input-select" 
             value={filter} 
@@ -57,6 +69,17 @@ export default function Alerts() {
             <option value="medium">Medium</option>
             <option value="low">Low</option>
           </select>
+          <button 
+            className="btn-secondary" 
+            onClick={clearAllAlerts}
+            disabled={alerts.length === 0}
+            style={{ 
+              borderColor: 'rgba(255, 23, 68, 0.4)', 
+              color: alerts.length > 0 ? '#ff1744' : 'var(--text-muted)' 
+            }}
+          >
+            Clear All
+          </button>
         </div>
       </div>
 

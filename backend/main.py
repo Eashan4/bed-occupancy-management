@@ -11,9 +11,14 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 from contextlib import asynccontextmanager
+import threading
+import time
+import serial
+import serial.tools.list_ports
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Header, Query
+import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse
 from sqlalchemy import select, func, update, desc, and_
@@ -38,6 +43,12 @@ from models import Device, SensorData, Alert, Patient, User, AuditLog
 # ============================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("hospital_iot")
+
+# ============================================
+# Global Serial Management
+# ============================================
+active_serial_readers = {}
+assigned_serial_ports = {}
 
 
 # ============================================
@@ -176,6 +187,12 @@ class AnomalyDetector:
 
     def __init__(self):
         self.data_buffer: dict = {}  # device_id -> list of recent readings
+        self.config = {
+            "heart_rate_low": HEART_RATE_LOW,
+            "heart_rate_high": HEART_RATE_HIGH,
+            "spo2_warning": SPO2_WARNING,
+            "spo2_critical": SPO2_CRITICAL
+        }
 
     def add_reading(self, device_id: str, heart_rate: float, spo2: float):
         """Buffer readings for sliding window analysis."""
@@ -197,32 +214,32 @@ class AnomalyDetector:
         3. Sliding window pattern analysis (sudden drops, erratic HR)
         """
         # Layer 1: Critical SpO2
-        if 0 < spo2 < SPO2_CRITICAL:
+        if 0 < spo2 < self.config["spo2_critical"]:
             return {
                 "alert_type": "low_spo2",
                 "severity": "critical",
-                "message": f"CRITICAL: SpO2 at {spo2}% (below {SPO2_CRITICAL}%)",
+                "message": f"CRITICAL: SpO2 at {spo2}% (below {self.config['spo2_critical']}%)",
             }
         # Layer 2: Warning SpO2
-        if 0 < spo2 < SPO2_WARNING:
+        if 0 < spo2 < self.config["spo2_warning"]:
             return {
                 "alert_type": "low_spo2",
                 "severity": "high",
-                "message": f"WARNING: SpO2 at {spo2}% (below {SPO2_WARNING}%)",
+                "message": f"WARNING: SpO2 at {spo2}% (below {self.config['spo2_warning']}%)",
             }
         # Layer 3: High heart rate
-        if heart_rate > HEART_RATE_HIGH:
+        if heart_rate > self.config["heart_rate_high"]:
             return {
                 "alert_type": "high_heart_rate",
                 "severity": "high",
-                "message": f"Heart rate elevated: {heart_rate} BPM (above {HEART_RATE_HIGH})",
+                "message": f"Heart rate elevated: {heart_rate} BPM (above {self.config['heart_rate_high']})",
             }
         # Layer 4: Low heart rate
-        if 0 < heart_rate < HEART_RATE_LOW:
+        if 0 < heart_rate < self.config["heart_rate_low"]:
             return {
                 "alert_type": "low_heart_rate",
                 "severity": "high",
-                "message": f"Heart rate low: {heart_rate} BPM (below {HEART_RATE_LOW})",
+                "message": f"Heart rate low: {heart_rate} BPM (below {self.config['heart_rate_low']})",
             }
 
         # Layer 5: Sliding window pattern analysis
@@ -344,6 +361,10 @@ class DeviceDataRequest(BaseModel):
 
 class HeartbeatRequest(BaseModel):
     device_id: str
+
+class SerialAssignRequest(BaseModel):
+    device_id: str
+    port: str
 
 class LoginRequest(BaseModel):
     username: str
@@ -557,14 +578,21 @@ async def receive_device_data(req: DeviceDataRequest, db: Session = Depends(get_
     if device.device_id != req.device_id:
         raise HTTPException(status_code=403, detail="API key does not match device_id")
 
-    # Validate sensor readings — reject zeros (sensor failure)
-    if req.heart_rate <= 0 or req.spo2 <= 0:
-        # Create hardware failure alert instead of silently accepting bad data
+    # Store sensor data immediately so the UI gets the bed_status update!
+    sensor = SensorData(
+        device_id=req.device_id, heart_rate=req.heart_rate,
+        spo2=req.spo2, bed_status=req.bed_status,
+    )
+    db.add(sensor)
+
+    # Validate sensor readings intelligently: 
+    # Only fire an "Offline/Failure" alert if the patient is marked IN BED but the sensor is dead.
+    if req.bed_status == 1 and (req.heart_rate <= 0 or req.spo2 <= 0):
         alert = Alert(
             device_id=req.device_id,
             alert_type="sensor_failure",
             severity="high",
-            message=f"Sensor failure on {req.device_id}: HR={req.heart_rate}, SpO2={req.spo2}. Check wiring.",
+            message=f"Patient in bed but sensor reading is empty (HR={req.heart_rate}, SpO2={req.spo2}). Check patient.",
         )
         db.add(alert)
         await ws_manager.broadcast({
@@ -572,17 +600,9 @@ async def receive_device_data(req: DeviceDataRequest, db: Session = Depends(get_
             "device_id": req.device_id,
             "alert_type": "sensor_failure",
             "severity": "high",
-            "message": f"Sensor failure on {req.device_id}",
+            "message": f"Patient in bed but sensor empty on {req.device_id}",
             "timestamp": datetime.utcnow().isoformat(),
         })
-        return {"status": "error", "detail": "Invalid sensor readings. Alert created."}
-
-    # Store sensor data
-    sensor = SensorData(
-        device_id=req.device_id, heart_rate=req.heart_rate,
-        spo2=req.spo2, bed_status=req.bed_status,
-    )
-    db.add(sensor)
 
     # Update device status
     device.status = "online"
@@ -643,23 +663,245 @@ async def device_heartbeat(req: HeartbeatRequest, db: Session = Depends(get_db),
 
     return {"status": "ok"}
 
+# ============================================
+# ROUTE: Serial Management & background reading
+# ============================================
+_serial_open_errors = {}  # device_id -> error string (set by thread on failure)
+
+def _serial_read_thread(device_id: str, port: str, stop_event: threading.Event, loop: asyncio.AbstractEventLoop):
+    logger.info(f"Starting serial thread for {device_id} on {port}")
+    try:
+        ser = serial.Serial(port, 115200, timeout=1)
+        time.sleep(1)  # wait for reset
+        ser.write(b"MODE:OFFLINE\n")
+        logger.info(f"Serial port {port} opened successfully for {device_id}")
+    except Exception as e:
+        err_msg = str(e)
+        logger.error(f"Failed to open port {port}: {err_msg}")
+        _serial_open_errors[device_id] = err_msg
+        # Remove ourselves from active readers since we failed
+        active_serial_readers.pop(device_id, None)
+        return
+
+    last_db_save = 0
+
+    while not stop_event.is_set():
+        try:
+            line_bytes = ser.readline()
+            if not line_bytes:
+                continue
+            line = line_bytes.decode('utf-8', errors='ignore').strip()
+
+            # If the ESP is still trying WiFi, force it offline
+            if "WiFi" in line or "Connecting" in line:
+                try:
+                    ser.write(b"MODE:OFFLINE\n")
+                except Exception:
+                    pass
+                continue
+
+            if not line.startswith("DATA:"):
+                logger.debug(f"Serial [{device_id}]: {line}")
+                continue
+
+            parts = line[5:].split(',')
+            data_dict = {}
+            for p in parts:
+                if '=' in p:
+                    k, v = p.split('=', 1)
+                    data_dict[k] = v
+
+            payload_device = data_dict.get('DEVICE')
+            if payload_device and payload_device != device_id:
+                # Security/routing fix: stop data if the user mapped the wrong port to this bed
+                logger.warning(f"Port {port} received data for {payload_device}, but thread was spawned for {device_id}. Ignoring.")
+                continue
+
+            hr = float(data_dict.get('HR', 0))
+            spo2 = float(data_dict.get('SPO2', 0))
+            bed_status = int(data_dict.get('BED', 0))
+
+            # 1. Immediate broadcast to live feed (allows smooth 10 FPS UI updates)
+            # Broadcast the live state (including bed status) regardless of whether HR is 0.
+            data_msg = {
+                "type": "sensor_data", "device_id": device_id,
+                "heart_rate": hr, "spo2": spo2, "bed_status": bed_status,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            asyncio.run_coroutine_threadsafe(ws_manager.broadcast(data_msg), loop)
+
+            if hr > 0 and spo2 > 0:
+                ai_detector.add_reading(device_id, hr, spo2)
+                anomaly = ai_detector.detect_anomaly(device_id, hr, spo2)
+                if anomaly:
+                    alert_msg = {
+                        "type": "alert", "device_id": device_id,
+                        "alert_type": anomaly["alert_type"], "severity": anomaly["severity"],
+                        "message": anomaly["message"], "timestamp": datetime.utcnow().isoformat()
+                    }
+                    asyncio.run_coroutine_threadsafe(ws_manager.broadcast(alert_msg), loop)
+            else:
+                anomaly = None
+                # If bed is occupied but we have no HR, we might want to flag a physical sensor warning,
+                # but for live UI, we just let it show HR=0 and bed_status=1.
+
+            # 2. Throttled Database Operations (prevent SQLite locks)
+            now = time.time()
+            if now - last_db_save < 2.0:  # 2 seconds throttle is enough
+                continue
+
+            last_db_save = now
+
+            with SessionLocal() as db:
+                device = db.execute(select(Device).where(Device.device_id == device_id)).scalar_one_or_none()
+                if not device:
+                    logger.error(f"Device {device_id} not found in DB, stopping serial thread")
+                    stop_event.set()
+                    break
+
+                was_offline = (device.status == "offline")
+                device.status = "online"
+                device.last_seen = datetime.utcnow()
+
+                if was_offline:
+                    status_msg = {"type": "device_status", "device_id": device_id, "status": "online", "timestamp": datetime.utcnow().isoformat()}
+                    asyncio.run_coroutine_threadsafe(ws_manager.broadcast(status_msg), loop)
+
+                # Add sensor snapshot (we record it EVEN IF hr <= 0 because bed_status might have changed)
+                sensor = SensorData(device_id=device_id, heart_rate=hr, spo2=spo2, bed_status=bed_status)
+                db.add(sensor)
+
+                # Persist anomaly if one occurred exactly at this snapshot tick
+                if anomaly:
+                    alert = Alert(device_id=device_id, alert_type=anomaly["alert_type"],
+                                  severity=anomaly["severity"], message=anomaly["message"])
+                    db.add(alert)
+                
+                db.commit()
+
+        except Exception as e:
+            logger.error(f"Error reading serial for {device_id}: {e}")
+            time.sleep(1)
+
+    # Cleanup
+    try:
+        ser.write(b"MODE:ONLINE\n")
+    except Exception:
+        pass
+    try:
+        ser.close()
+    except Exception:
+        pass
+    active_serial_readers.pop(device_id, None)
+    logger.info(f"Stopped serial thread for {device_id}")
+
+@app.get("/api/serial/ports")
+async def get_serial_ports(auth: dict = Depends(verify_jwt)):
+    ports = serial.tools.list_ports.comports()
+    return [{"device": p.device, "description": p.description} for p in ports]
+
+@app.post("/api/serial/assign")
+async def assign_serial_port(req: SerialAssignRequest, db: Session = Depends(get_db), auth: dict = Depends(verify_jwt)):
+    result = db.execute(select(Device).where(Device.device_id == req.device_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Device not found")
+    assigned_serial_ports[req.device_id] = req.port
+    return {"status": "ok", "message": f"Port {req.port} assigned to {req.device_id}"}
+
+@app.post("/api/serial/start/{device_id}")
+async def start_serial_reader(device_id: str, db: Session = Depends(get_db), auth: dict = Depends(verify_jwt)):
+    # Clean up dead threads
+    if device_id in active_serial_readers:
+        t = active_serial_readers[device_id]["thread"]
+        if not t.is_alive():
+            active_serial_readers.pop(device_id, None)
+        else:
+            return {"status": "ok", "message": "Already running"}
+
+    port = assigned_serial_ports.get(device_id)
+    if not port:
+        raise HTTPException(status_code=400, detail="No COM port assigned to this device. Select a port first.")
+
+    # Clear any previous error
+    _serial_open_errors.pop(device_id, None)
+
+    stop_event = threading.Event()
+    loop = asyncio.get_running_loop()
+    t = threading.Thread(target=_serial_read_thread, args=(device_id, port, stop_event, loop), daemon=True)
+    t.start()
+    active_serial_readers[device_id] = {"thread": t, "stop_event": stop_event, "port": port}
+
+    # Wait 0.5s — port open failures are near-instant; success takes ~1s (DTR reset)
+    await asyncio.sleep(0.5)
+
+    # Check for port-open error set by thread
+    if device_id in _serial_open_errors:
+        err = _serial_open_errors.pop(device_id)
+        active_serial_readers.pop(device_id, None)
+        if "Resource busy" in err or "Errno 16" in err:
+            raise HTTPException(status_code=409, detail=f"Port {port} is busy. Close Arduino Serial Monitor (Tools → Serial Monitor) and try again.")
+        raise HTTPException(status_code=500, detail=f"Failed to open {port}: {err}")
+
+    # Also check if thread died without setting an error
+    if not t.is_alive():
+        active_serial_readers.pop(device_id, None)
+        raise HTTPException(status_code=500, detail=f"Serial thread died immediately for {port}. Check if the ESP8266 is plugged in.")
+
+    return {"status": "ok", "message": f"Wired mode active — reading {port} for {device_id}"}
+
+@app.post("/api/serial/stop/{device_id}")
+async def stop_serial_reader(device_id: str, auth: dict = Depends(verify_jwt)):
+    if device_id in active_serial_readers:
+        active_serial_readers[device_id]["stop_event"].set()
+        active_serial_readers.pop(device_id, None)
+        return {"status": "ok", "message": f"Stopped serial reader for {device_id}"}
+    return {"status": "ok", "message": "Not running"}
+
+@app.get("/api/serial/status")
+async def get_serial_status(auth: dict = Depends(verify_jwt)):
+    # Prune dead threads
+    dead = [d for d, v in active_serial_readers.items() if not v["thread"].is_alive()]
+    for d in dead:
+        active_serial_readers.pop(d, None)
+    return {
+        "active": [{"device_id": d, "port": active_serial_readers[d]["port"]} for d in active_serial_readers],
+        "assigned": assigned_serial_ports
+    }
+
 
 # ============================================
 # ROUTE: Dashboard — Device List
 # ============================================
 @app.get("/api/dashboard/devices")
 async def get_devices(db: Session = Depends(get_db), auth: dict = Depends(verify_jwt)):
-    result = db.execute(select(Device).order_by(Device.ward, Device.bed_number))
-    devices = result.scalars().all()
-    return [
-        {
-            "id": d.id, "device_id": d.device_id, "bed_number": d.bed_number,
-            "ward": d.ward, "patient_name": d.patient_name, "status": d.status,
-            "last_seen": d.last_seen.isoformat() if d.last_seen else None,
-            "created_at": d.created_at.isoformat() if d.created_at else None,
-        }
-        for d in devices
-    ]
+    # Join Device and Patient to inject demographics for the Digital Twin
+    query = (
+        select(Device, Patient)
+        .outerjoin(Patient, and_(Device.device_id == Patient.device_id, Patient.status == "admitted"))
+        .order_by(Device.ward, Device.bed_number)
+    )
+    result = db.execute(query).all()
+
+    response = []
+    for device, patient in result:
+        response.append({
+            "id": device.id,
+            "device_id": device.device_id,
+            "api_key": device.api_key,
+            "bed_number": device.bed_number,
+            "ward": device.ward,
+            "patient_name": device.patient_name,
+            "status": device.status,
+            "last_seen": device.last_seen.isoformat() if device.last_seen else None,
+            "created_at": device.created_at.isoformat() if device.created_at else None,
+            "patient": {
+                "name": patient.name,
+                "age": patient.age,
+                "gender": patient.gender,
+                "condition": patient.condition,
+            } if patient and patient.name else None,
+        })
+    return response
 
 
 # ============================================
@@ -689,6 +931,7 @@ async def get_device_detail(device_id: str, limit: int = Query(100, le=500), db:
             "id": device.id, "device_id": device.device_id, "bed_number": device.bed_number,
             "ward": device.ward, "patient_name": device.patient_name, "status": device.status,
             "last_seen": device.last_seen.isoformat() if device.last_seen else None,
+            "api_key": device.api_key,
         },
         "vitals": [
             {"heart_rate": v.heart_rate, "spo2": v.spo2, "bed_status": v.bed_status, "timestamp": v.timestamp.isoformat()}
@@ -761,7 +1004,9 @@ async def get_alerts(
     query = select(Alert).order_by(desc(Alert.timestamp)).limit(limit)
     if severity:
         query = query.where(Alert.severity == severity)
-    if status:
+    if status is None:
+        query = query.where(Alert.escalation_status != "acknowledged")
+    elif status:
         query = query.where(Alert.escalation_status == status)
     result = db.execute(query)
     alerts = result.scalars().all()
@@ -776,20 +1021,27 @@ async def get_alerts(
         for a in alerts
     ]
 
-
-# ============================================
-# ROUTE: Acknowledge Alert
-# ============================================
 @app.put("/api/dashboard/alerts/{alert_id}/acknowledge")
 async def acknowledge_alert(alert_id: int, db: Session = Depends(get_db), auth: dict = Depends(verify_jwt)):
-    result = db.execute(select(Alert).where(Alert.id == alert_id))
-    alert = result.scalar_one_or_none()
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert not found")
-    alert.escalation_status = "acknowledged"
-    alert.acknowledged_by = auth.get("username", "unknown")
-    db.add(AuditLog(user_id=int(auth["sub"]), action="alert_acknowledged", details=f"Alert {alert_id} acknowledged"))
-    return {"message": "Alert acknowledged"}
+    alert = db.execute(select(Alert).where(Alert.id == alert_id)).scalar_one_or_none()
+    if alert:
+        alert.escalation_status = "acknowledged"
+        alert.acknowledged_by = auth.get("sub", "admin")
+        alert.acknowledged_at = datetime.utcnow()
+        db.commit()
+    return {"status": "ok"}
+
+@app.delete("/api/dashboard/alerts")
+async def clear_all_alerts(db: Session = Depends(get_db), auth: dict = Depends(verify_jwt)):
+    # Acknowledge or clear all currently active alerts
+    result = db.execute(select(Alert).where(Alert.escalation_status != "acknowledged"))
+    alerts = result.scalars().all()
+    for alert in alerts:
+        alert.escalation_status = "acknowledged"
+        alert.acknowledged_by = auth.get("sub", "admin")
+        alert.acknowledged_at = datetime.utcnow()
+    db.commit()
+    return {"status": "ok", "cleared_count": len(alerts)}
 
 
 # ============================================
@@ -797,24 +1049,104 @@ async def acknowledge_alert(alert_id: int, db: Session = Depends(get_db), auth: 
 # ============================================
 @app.get("/api/dashboard/export/{device_id}")
 async def export_vitals_csv(device_id: str, db: Session = Depends(get_db), auth: dict = Depends(verify_jwt)):
-    result = db.execute(
-        select(SensorData).where(SensorData.device_id == device_id).order_by(SensorData.timestamp)
-    )
+    result = db.execute(select(SensorData).where(SensorData.device_id == device_id).order_by(SensorData.timestamp))
     vitals = result.scalars().all()
-
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["timestamp", "heart_rate", "spo2", "bed_status"])
+    writer.writerow(["device_id", "timestamp", "heart_rate", "spo2", "bed_status"])
     for v in vitals:
-        writer.writerow([v.timestamp.isoformat(), v.heart_rate, v.spo2, v.bed_status])
-
+        writer.writerow([device_id, v.timestamp.isoformat(), v.heart_rate, v.spo2, v.bed_status])
     output.seek(0)
     return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
+        iter([output.getvalue()]), media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={device_id}_vitals.csv"},
     )
 
+@app.get("/api/system/export")
+async def export_system_logs_csv(
+    token: Optional[str] = None,
+    db: Session = Depends(get_db),
+    authorization: str = Header(None)
+):
+    """Export audit logs as CSV. Accepts JWT via Bearer header OR ?token= query param (for direct browser downloads)."""
+    # Resolve token from header or query param
+    resolved_token = None
+    if authorization and authorization.startswith("Bearer "):
+        resolved_token = authorization.split(" ")[1]
+    elif token:
+        resolved_token = token
+    else:
+        raise HTTPException(status_code=401, detail="Missing auth token")
+
+    try:
+        from jose import jwt as _jwt
+        _jwt.decode(resolved_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    result = db.execute(select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(1000))
+    logs = result.scalars().all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["timestamp", "user_id", "action", "details", "ip_address"])
+    for log in logs:
+        writer.writerow([log.timestamp.isoformat(), log.user_id, log.action, log.details, log.ip_address])
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=system_audit_logs.csv"},
+    )
+
+class SystemConfigRequest(BaseModel):
+    heart_rate_low: int
+    heart_rate_high: int
+    spo2_warning: int
+    spo2_critical: int
+
+# Global overrides for AI detector config
+global_ai_config = {
+    "heart_rate_low": HEART_RATE_LOW,
+    "heart_rate_high": HEART_RATE_HIGH,
+    "spo2_warning": SPO2_WARNING,
+    "spo2_critical": SPO2_CRITICAL
+}
+
+@app.get("/api/system/config")
+async def get_system_config(auth: dict = Depends(verify_jwt)):
+    return global_ai_config
+
+import dotenv
+@app.post("/api/system/config")
+async def update_system_config(req: SystemConfigRequest, auth: dict = Depends(verify_jwt)):
+    global_ai_config["heart_rate_low"] = req.heart_rate_low
+    global_ai_config["heart_rate_high"] = req.heart_rate_high
+    global_ai_config["spo2_warning"] = req.spo2_warning
+    global_ai_config["spo2_critical"] = req.spo2_critical
+    # Update the live detector thresholds immediately
+    ai_detector.config = global_ai_config
+    
+    # Write to .env file permanently
+    env_file = os.path.join(os.path.dirname(__file__), "..", ".env")
+    if os.path.exists(env_file):
+        dotenv.set_key(env_file, "HEART_RATE_LOW", str(req.heart_rate_low))
+        dotenv.set_key(env_file, "HEART_RATE_HIGH", str(req.heart_rate_high))
+        dotenv.set_key(env_file, "SPO2_WARNING", str(req.spo2_warning))
+        dotenv.set_key(env_file, "SPO2_CRITICAL", str(req.spo2_critical))
+
+    return {"status": "ok", "message": "AI Thresholds updated successfully"}
+
+@app.get("/api/serial/mode")
+async def get_serial_mode(auth: dict = Depends(verify_jwt)):
+    """Returns the data mode (wired/wireless) for each registered device."""
+    # Prune dead threads first
+    dead = [d for d, v in active_serial_readers.items() if not v["thread"].is_alive()]
+    for d in dead:
+        active_serial_readers.pop(d, None)
+    wired_devices = list(active_serial_readers.keys())
+    return {
+        "wired_devices": wired_devices,
+        "assigned_ports": assigned_serial_ports,
+    }
 
 # ============================================
 # ROUTE: Regenerate API Key
