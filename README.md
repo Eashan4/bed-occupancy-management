@@ -60,8 +60,11 @@ A production-grade, real-time IoT-based hospital monitoring system that tracks *
 ## 🏗️ System Architecture
 
 ```mermaid
+---
+config:
+  layout: dagre
+---
 graph LR
-  %% Define styles
   classDef hard fill:#f5f5f5,stroke:#424242,stroke-width:2px,color:#000;
   classDef edge fill:#c5e1a5,stroke:#33691e,stroke-width:2px,color:#000;
   classDef net fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000;
@@ -91,7 +94,7 @@ graph LR
 
     ESP -- "JSON POST" --> WiFi
     ESP -. "115200 Baud" .-> SerialRx
-    WiFi ===> Auth
+    WiFi ==> Auth
   end
 
   subgraph Processing["3. Application Layer (FastAPI)"]
@@ -110,7 +113,7 @@ graph LR
   subgraph Storage["4. State & Communication"]
     direction TB
     DB[("PostgreSQL DB<br/>(SQLAlchemy ORM)")]:::db
-    WS((("WebSocket Server<br/>(ws_manager)"))):::net
+    WS(("WebSocket Server<br/>(ws_manager)")):::net
 
     Router -- "Throttled Write" --> DB
     SerialTh -- "Throttled Write" --> DB
@@ -118,9 +121,9 @@ graph LR
     
     AI -- "Inject Alerts" --> DB
     
-    AI -- "Instant Alert Fire" ----> WS
-    Router -- "Frame Broadcast" --> WS
-    SerialTh -- "Frame Broadcast" --> WS
+    AI -- "Instant Alert Fire" ---> WS
+    Router -- "Timeout Broadcast" --> WS
+    SerialTh -- "Timeout Broadcast" --> WS
     Sched -- "Timeout Broadcast" --> WS
   end
 
@@ -131,7 +134,7 @@ graph LR
     VitalUI["Live Vitals UI<br/>(Waveforms & Gauges)"]:::vis
     AlertUI["Alert Manager<br/>(Toast Notifications)"]:::vis
 
-    WS === "Live Data Sync" ===> Client
+    WS == "Live Data Sync"==> Client
     Client --> Three
     Client --> VitalUI
     Client --> AlertUI
