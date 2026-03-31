@@ -59,31 +59,83 @@ A production-grade, real-time IoT-based hospital monitoring system that tracks *
 
 ## 🏗️ System Architecture
 
-```
-┌─────────────────┐     HTTP POST      ┌──────────────────────┐
-│   ESP8266 #1    │ ──────────────────► │                      │
-│  (Bed Sensor)   │     /api/device/    │   FastAPI Backend    │
-└─────────────────┘      data           │                      │
-                                        │  ┌────────────────┐  │
-┌─────────────────┐     HTTP POST      │  │ AI Anomaly     │  │     ┌──────────────┐
-│   ESP8266 #2    │ ──────────────────► │  │ Detection      │  │────►│  PostgreSQL   │
-│  (Bed Sensor)   │                     │  └────────────────┘  │     │  (Supabase)   │
-└─────────────────┘                     │                      │     └──────────────┘
-                                        │  ┌────────────────┐  │
-┌─────────────────┐     HTTP POST      │  │ Alert Engine   │  │
-│   ESP8266 #N    │ ──────────────────► │  └────────────────┘  │
-│  (Bed Sensor)   │                     │                      │
-└─────────────────┘                     └──────────┬───────────┘
-                                                   │
-                                            WebSocket /ws/live
-                                                   │
-                                        ┌──────────▼───────────┐
-                                        │   3D Dashboard       │
-                                        │  (HTML/CSS/JS)       │
-                                        │  - Floor Plan        │
-                                        │  - Live Vitals       │
-                                        │  - Alert Panel       │
-                                        └──────────────────────┘
+```mermaid
+graph LR
+  %% Define styles
+  classDef hard fill:#f5f5f5,stroke:#424242,stroke-width:2px,color:#000;
+  classDef edge fill:#c5e1a5,stroke:#33691e,stroke-width:2px,color:#000;
+  classDef net fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000;
+  classDef back fill:#bbdefb,stroke:#0d47a1,stroke-width:2px,color:#000;
+  classDef core fill:#ffe082,stroke:#ff6f00,stroke-width:2px,color:#000;
+  classDef auth fill:#ef9a9a,stroke:#b71c1c,stroke-width:2px,color:#000;
+  classDef vis fill:#e1bee7,stroke:#4a148c,stroke-width:2px,color:#000;
+  classDef db fill:#ffcc80,stroke:#e65100,stroke-width:2px,color:#000;
+
+  subgraph Edge["1. Hardware / Edge Layer"]
+    direction TB
+    MAX["MAX30102<br/>(HR & SpO2)"]:::hard
+    FSR["FSR 402<br/>(Bed Pressure)"]:::hard
+    BTN["Push Button<br/>(Manual Toggle)"]:::hard
+    ESP["ESP8266 NodeMCU<br/>(Microcontroller)"]:::edge
+    
+    MAX -- "I2C" --> ESP
+    FSR -- "ADC" --> ESP
+    BTN -- "GPIO" --> ESP
+  end
+
+  subgraph Ingestion["2. Ingestion & Security"]
+    direction TB
+    WiFi["WiFi Module<br/>(HTTP Client)"]:::net
+    SerialRx["Serial COM<br/>(Offline Mode)"]:::net
+    Auth{"API Key / JWT<br/>Middleware"}:::auth
+
+    ESP -- "JSON POST" --> WiFi
+    ESP -. "115200 Baud" .-> SerialRx
+    WiFi ===> Auth
+  end
+
+  subgraph Processing["3. Application Layer (FastAPI)"]
+    direction TB
+    Router["REST API<br/>(/api/device/data)"]:::back
+    SerialTh["Background Thread<br/>(_serial_read_thread)"]:::back
+    Sched["APScheduler<br/>(Timeouts/Escalation)"]:::back
+    AI{"AI Anomaly Engine<br/>(Rule-based Matrices)"}:::core
+
+    Auth --> Router
+    SerialRx --> SerialTh
+    Router --> AI
+    SerialTh --> AI
+  end
+
+  subgraph Storage["4. State & Communication"]
+    direction TB
+    DB[("PostgreSQL DB<br/>(SQLAlchemy ORM)")]:::db
+    WS((("WebSocket Server<br/>(ws_manager)"))):::net
+
+    Router -- "Throttled Write" --> DB
+    SerialTh -- "Throttled Write" --> DB
+    Sched -- "Query & Timeout" --> DB
+    
+    AI -- "Inject Alerts" --> DB
+    
+    AI -- "Instant Alert Fire" ----> WS
+    Router -- "Frame Broadcast" --> WS
+    SerialTh -- "Frame Broadcast" --> WS
+    Sched -- "Timeout Broadcast" --> WS
+  end
+
+  subgraph Dashboard["5. Visualization Layer (React)"]
+    direction TB
+    Client["React App Hook<br/>(useWebSocket)"]:::vis
+    Three["3D Floorplan<br/>(Color-coded Status)"]:::vis
+    VitalUI["Live Vitals UI<br/>(Waveforms & Gauges)"]:::vis
+    AlertUI["Alert Manager<br/>(Toast Notifications)"]:::vis
+
+    WS === "Live Data Sync" ===> Client
+    Client --> Three
+    Client --> VitalUI
+    Client --> AlertUI
+  end
 ```
 
 ### Data Flow
